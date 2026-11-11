@@ -281,3 +281,23 @@ def test_proxy_spec_error_does_not_show_password():
     with pytest.raises(ToolError) as e:
         proxy_spec("socks5://user:secret@127.0.0.1")  # no port
     assert "secret" not in str(e.value)
+
+
+def test_proxy_spec_bad_port_is_a_tool_error_without_password():
+    # p.port raises ValueError: MCP would hide it, and every tool would fail without a reason
+    for url in ("socks5://u:secret@host:99999", "socks5://u:secret@host:port", "mtproto://host:port/abc"):
+        with pytest.raises(ToolError) as e:
+            proxy_spec(url)
+        assert "secret" not in str(e.value)
+
+
+def test_resolve_proxy_auto_skips_bad_port(monkeypatch):
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [
+        ("http://host:port", "переменная окружения https_proxy"),
+        ("socks5://os:1080", "настройки прокси ОС"),
+    ])
+    assert resolve_proxy("auto")[0]["addr"] == "os"
+
+
+def test_mask_credentials_hides_mtproto_secret_without_host():
+    assert mask_credentials("mtproto:///ee1603secret") == "mtproto://***"

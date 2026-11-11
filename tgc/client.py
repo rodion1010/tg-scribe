@@ -45,6 +45,13 @@ def load_config():
     return int(conf["api_id"]), conf["api_hash"], conf.get("proxy")
 
 
+def _port(p):
+    try:
+        return p.port
+    except ValueError:  # not a number or over 65535: a bad proxy URL, not a crash
+        return None
+
+
 def proxy_spec(url):
     """URL прокси → (proxy, connection) для TelegramClient; (None, None) — напрямую.
 
@@ -58,22 +65,22 @@ def proxy_spec(url):
     if "://" not in url:
         url = "https://" + url  # схема не указана — по умолчанию https (HTTP CONNECT)
     p = urlparse(url)
-    scheme = p.scheme.lower()
+    scheme, port = p.scheme.lower(), _port(p)
     if scheme == "socks":  # версия SOCKS не указана — считаем SOCKS5
         scheme = "socks5"
     if scheme == "mtproto":
         secret = unquote(p.path.lstrip("/")) or unquote(parse_qs(p.query).get("secret", [""])[0])
-        if not p.hostname or not p.port or not secret:
+        if not p.hostname or not port or not secret:
             raise ToolError(f"proxy = {mask_credentials(url)!r}: ожидается mtproto://хост:порт/секрет")
-        return (p.hostname, p.port, secret), ConnectionTcpMTProxyAbridged
+        return (p.hostname, port, secret), ConnectionTcpMTProxyAbridged
     if scheme == "https":  # python-socks: HTTP CONNECT, шифрование до прокси не поддерживается
         scheme = "http"
-    if scheme not in ("socks5", "socks4", "http") or not p.hostname or not p.port:
+    if scheme not in ("socks5", "socks4", "http") or not p.hostname or not port:
         raise ToolError(
             f"proxy = {mask_credentials(url)!r}: ожидается socks5://хост:порт, socks4://хост:порт, http(s)://хост:порт, "
             "mtproto://хост:порт/секрет или просто хост:порт"
         )
-    spec = {"proxy_type": scheme, "addr": p.hostname, "port": p.port, "rdns": True}
+    spec = {"proxy_type": scheme, "addr": p.hostname, "port": port, "rdns": True}
     if p.username:
         spec["username"] = unquote(p.username)  # p%40ss in a URL is the password p@ss
     if p.password:
@@ -84,10 +91,12 @@ def proxy_spec(url):
 def mask_credentials(url):
     """URL прокси с замаскированным паролем — для вывода в лог и ошибки."""
     p = urlparse(url if "://" in url else "https://" + url)
-    if not p.hostname:  # unparsed: still hide whatever stands before «@»
+    if not p.hostname:  # unparsed: still hide the secret and whatever stands before «@»
+        if p.scheme == "mtproto":
+            return "mtproto://***"
         return "***@" + url.rsplit("@", 1)[1] if "@" in url else url
     auth = f"{unquote(p.username)}:***@" if p.username else ""
-    port = f":{p.port}" if p.port else ""
+    port = f":{_port(p)}" if _port(p) else ""
     tail = ("/***" if p.scheme == "mtproto" else f"/{unquote(p.path.lstrip('/'))}") if p.path.strip("/") else ""  # the MTProto secret is a password
     return f"{p.scheme}://{auth}{p.hostname}{port}{tail}"
 
