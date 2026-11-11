@@ -490,13 +490,6 @@ async def sync_chat(client, entity, days=None, topic=None, root=ARCHIVE):
     topic — (id, название) топика форума: выгружаются только его сообщения, в папку топика."""
     start = time.monotonic()
     path = topic_dir(root, get_peer_id(entity), get_display_name(entity), *topic) if topic else chat_dir(root, get_peer_id(entity), get_display_name(entity))
-    # General (id 1) is not a reply thread: its messages are the forum's ones without the topic mark
-    general = bool(topic) and topic[0] == 1
-    thread = topic[0] if topic and not general else None
-
-    def skip(msg):
-        return isinstance(msg, MessageService) or (general and getattr(msg.reply_to, "forum_topic", False))
-
     first_id, last_id = id_range(path)
     # The depth (unix time, 0 = the whole history) is kept on disk: a big load spans several calls.
     depth = path / ".depth"
@@ -525,8 +518,8 @@ async def sync_chat(client, entity, days=None, topic=None, root=ARCHIVE):
     try:
         if last_id:
             try:
-                async for msg in client.iter_messages(entity, min_id=last_id, reply_to=thread, reverse=True, wait_time=1):
-                    if skip(msg):
+                async for msg in client.iter_messages(entity, min_id=last_id, reply_to=topic[0] if topic else None, reverse=True, wait_time=1):
+                    if isinstance(msg, MessageService):
                         continue
                     transcript = None
                     if is_voice(msg):
@@ -562,10 +555,10 @@ async def sync_chat(client, entity, days=None, topic=None, root=ARCHIVE):
         if target is not None:
             # Old history is not transcribed, OCR'd or read: that is done lazily, when a task needs it.
             try:
-                async for msg in client.iter_messages(entity, max_id=first_id, reply_to=thread, wait_time=1):
+                async for msg in client.iter_messages(entity, max_id=first_id, reply_to=topic[0] if topic else None, wait_time=1):
                     if msg.date.timestamp() < target:
                         break
-                    if skip(msg):
+                    if isinstance(msg, MessageService):
                         continue
                     buf.setdefault(f"{msg.date.astimezone():%Y-%m}", []).append(describe(msg))
                     old += 1
