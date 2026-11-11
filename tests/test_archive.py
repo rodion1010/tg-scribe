@@ -14,7 +14,7 @@ from tgc.archive import (
 )
 from telethon.tl.types import (
     Document, DocumentAttributeAudio, DocumentAttributeFilename, Message, MessageFwdHeader, MessageMediaDocument,
-    MessageMediaPhoto, MessageReplyHeader, PeerUser, Photo, User,
+    Channel, MessageMediaPhoto, MessageReplyHeader, PeerUser, Photo, User,
 )
 
 D = datetime(2026, 10, 31, 14, 2)
@@ -131,6 +131,7 @@ class FakeChat:
         self.msgs.append(Message(i, PeerUser(1), date, "", media=MessageMediaPhoto(photo=Photo(i, 0, b"", date, [], 2))))
 
     async def iter_messages(self, entity, min_id=0, max_id=0, reverse=False, wait_time=None, reply_to=None):
+        self.reply_to = reply_to
         msgs = [m for m in self.msgs if m.id > min_id and (not max_id or m.id < max_id)]
         for m in msgs if reverse else msgs[::-1]:
             yield m
@@ -409,3 +410,13 @@ def test_sync_does_not_count_big_file_as_read(tmp_path):
     out = asyncio.run(sync_chat(chat, user, root=tmp_path))
     assert "файлов прочитано 1" in out and chat.downloads == 1  # a.txt only
     assert pending_ids(chat_dir(tmp_path, 1, "Иван"), "файл") == [4]  # over 10 MB: left for read_files
+
+
+def test_sync_general_topic_keeps_only_messages_without_topic_mark(tmp_path):
+    """General (id 1) is not a reply thread: the forum history is read whole and other topics' messages are dropped."""
+    chat = FakeChat(3, 2, 1)
+    chat.msgs[1].reply_to = MessageReplyHeader(forum_topic=True, reply_to_msg_id=5, reply_to_top_id=5)  # topic #5
+    forum = Channel(id=10, title="Форум", photo=None, date=None, forum=True)
+    asyncio.run(sync_chat(chat, forum, topic=(1, "General"), root=tmp_path))
+    assert chat.reply_to is None
+    assert archived(next(tmp_path.glob("*__*/General__1"))) == [1, 3]
