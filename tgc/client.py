@@ -64,13 +64,13 @@ def proxy_spec(url):
     if scheme == "mtproto":
         secret = unquote(p.path.lstrip("/")) or unquote(parse_qs(p.query).get("secret", [""])[0])
         if not p.hostname or not p.port or not secret:
-            raise ToolError(f"proxy = {url!r}: ожидается mtproto://хост:порт/секрет")
+            raise ToolError(f"proxy = {mask_credentials(url)!r}: ожидается mtproto://хост:порт/секрет")
         return (p.hostname, p.port, secret), ConnectionTcpMTProxyAbridged
     if scheme == "https":  # python-socks: HTTP CONNECT, шифрование до прокси не поддерживается
         scheme = "http"
     if scheme not in ("socks5", "socks4", "http") or not p.hostname or not p.port:
         raise ToolError(
-            f"proxy = {url!r}: ожидается socks5://хост:порт, socks4://хост:порт, http(s)://хост:порт, "
+            f"proxy = {mask_credentials(url)!r}: ожидается socks5://хост:порт, socks4://хост:порт, http(s)://хост:порт, "
             "mtproto://хост:порт/секрет или просто хост:порт"
         )
     spec = {"proxy_type": scheme, "addr": p.hostname, "port": p.port, "rdns": True}
@@ -84,11 +84,11 @@ def proxy_spec(url):
 def mask_credentials(url):
     """URL прокси с замаскированным паролем — для вывода в лог и ошибки."""
     p = urlparse(url if "://" in url else "https://" + url)
-    if not p.hostname:
-        return url
+    if not p.hostname:  # unparsed: still hide whatever stands before «@»
+        return "***@" + url.rsplit("@", 1)[1] if "@" in url else url
     auth = f"{unquote(p.username)}:***@" if p.username else ""
     port = f":{p.port}" if p.port else ""
-    tail = f"/{unquote(p.path.lstrip('/'))}" if p.path.strip("/") else ""
+    tail = ("/***" if p.scheme == "mtproto" else f"/{unquote(p.path.lstrip('/'))}") if p.path.strip("/") else ""  # the MTProto secret is a password
     return f"{p.scheme}://{auth}{p.hostname}{port}{tail}"
 
 
@@ -244,15 +244,20 @@ async def search(client, query: str):
 
 async def topics(client, entity) -> list[tuple[int, str]]:
     """Топики форума: (id, название), постранично."""
-    out, seen, offset = [], set(), 0
+    out, seen = [], set()
+    offset_date = offset_id = offset_topic = 0
     while True:
-        r = await client(GetForumTopicsRequest(peer=entity, offset_date=0, offset_id=0, offset_topic=offset, limit=100))
+        r = await client(GetForumTopicsRequest(peer=entity, offset_date=offset_date, offset_id=offset_id,
+                                               offset_topic=offset_topic, limit=100))
         fresh = [(t.id, t.title) for t in r.topics if hasattr(t, "title") and t.id not in seen]
         if not fresh:
             return out
         out += fresh
         seen |= {i for i, _ in fresh}
-        offset = fresh[-1][0]
+        # The next page needs all three offsets of the last topic: offset_date=0 means «from the start»
+        last = r.topics[-1]
+        offset_id, offset_topic = getattr(last, "top_message", 0), last.id
+        offset_date = next((m.date for m in r.messages if m.id == offset_id), 0)
 
 
 async def resolve_topic(client, entity, topic: str):
