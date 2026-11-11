@@ -11,7 +11,8 @@
     ],
     "ask": [
       "mcp__tg__fetch_large_file",
-      "mcp__tg__send_message"
+      "mcp__tg__send_message",
+      "mcp__tg__forward_messages"
     ]
   }
 }

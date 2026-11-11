@@ -50,6 +50,17 @@ def chat_dir(root: Path, chat_id: int, title: str) -> Path:
     return path
 
 
+def topic_dir(root: Path, chat_id: int, chat_title: str, topic_id: int, topic_title: str) -> Path:
+    """Папка топика внутри папки чата; как и чат, находится по id, а не по названию."""
+    chat = chat_dir(root, chat_id, chat_title)
+    found = sorted(chat.glob(f"*__{topic_id}"))
+    if found:
+        return found[0]
+    path = chat / f"{re.sub(r'[^\w.-]+', '-', topic_title).strip('-')[:60] or 'topic'}__{topic_id}"
+    path.mkdir(parents=True)
+    return path
+
+
 def month_files(path: Path):
     return sorted(path.glob("????-??.md"))
 
@@ -59,7 +70,7 @@ def id_range(path: Path) -> tuple[int, int]:
     or a history import, the newest id can sit in an older file."""
     ids = []
     for f in month_files(path):
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         ids += map(int, HEADER.findall(text[: text.rfind("\n") + 1]))  # a line cut by a crash has no "\n"
     return (min(ids), max(ids)) if ids else (0, 0)
 
@@ -67,17 +78,17 @@ def id_range(path: Path) -> tuple[int, int]:
 def append(path: Path, month: str, lines: list[str]):
     f = path / f"{month}.md"
     if f.exists():
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         if text and not text.endswith("\n"):  # drop a line cut by a crash before appending
-            f.write_text(text[: text.rfind("\n") + 1])
-    with open(f, "a") as out:
+            f.write_text(text[: text.rfind("\n") + 1], encoding="utf-8")
+    with open(f, "a", encoding="utf-8") as out:
         out.write("".join(lines))
 
 
 def prepend(path: Path, month: str, lines: list[str]):
     f = path / f"{month}.md"
     tmp = f.with_suffix(".tmp")
-    tmp.write_text("".join(lines) + (f.read_text() if f.exists() else ""))
+    tmp.write_text("".join(lines) + (f.read_text(encoding="utf-8") if f.exists() else ""), encoding="utf-8")
     tmp.replace(f)
 
 
@@ -85,11 +96,11 @@ def update_block(path: Path, msg_id: int, fn) -> bool:
     """Rewrites one message (header plus continuation lines) with fn(block)."""
     block = re.compile(rf"^\[[^\]]+\] #{msg_id} .*\n(?:  .*\n)*", re.M)
     for f in reversed(month_files(path)):
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         m = block.search(text)
         if m:
             tmp = f.with_suffix(".tmp")
-            tmp.write_text(text[: m.start()] + fn(m.group()) + text[m.end():])
+            tmp.write_text(text[: m.start()] + fn(m.group()) + text[m.end():], encoding="utf-8")
             tmp.replace(f)
             return True
     return False
@@ -122,7 +133,7 @@ def pending_ids(path: Path, kind: str) -> list[int]:
     ids = []
     for f in reversed(month_files(path)):
         # The tag followed only by other tags and then ": ", so a sender name may contain ": " too.
-        ids += reversed([int(i) for i in re.findall(rf"^\[[^\]]+\] #(\d+) .*?{PENDING[kind]}(?: \[[^\]]*\])*: ", f.read_text(), re.M)])
+        ids += reversed([int(i) for i in re.findall(rf"^\[[^\]]+\] #(\d+) .*?{PENDING[kind]}(?: \[[^\]]*\])*: ", f.read_text(encoding="utf-8"), re.M)])
     return ids
 
 
@@ -400,14 +411,14 @@ async def read_media(client, msg, path):
     if not lines:
         return f"{info}, без текста", []
     (path / "text").mkdir(exist_ok=True)
-    (path / "text" / f"{msg.id}.txt").write_text("\n".join(lines) + "\n")
+    (path / "text" / f"{msg.id}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return f"{info}, с текстом", []
 
 
-async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
+async def process_media(client, entity, kind, ids=None, root=ARCHIVE, topic=None):
     start = time.monotonic()
     tool, what = ("ocr_photos", "фото") if kind == "фото" else ("read_files", "файлов")
-    path = chat_dir(root, get_peer_id(entity), get_display_name(entity))
+    path = topic_dir(root, get_peer_id(entity), get_display_name(entity), *topic) if topic else chat_dir(root, get_peer_id(entity), get_display_name(entity))
     pending = pending_ids(path, kind)
     # Already processed ones are skipped: processing again would duplicate the text lines.
     ids = [i for i in ids if i in pending] if ids else pending
@@ -441,12 +452,12 @@ async def process_media(client, entity, kind, ids=None, root=ARCHIVE):
     return f"{status}: обработано {done}, ошибок {failed}, осталось необработанных {what} {left}. Папка: {path}"
 
 
-async def ocr_photos(client, entity, ids=None, root=ARCHIVE):
-    return await process_media(client, entity, "фото", ids, root)
+async def ocr_photos(client, entity, ids=None, root=ARCHIVE, topic=None):
+    return await process_media(client, entity, "фото", ids, root, topic)
 
 
-async def read_files(client, entity, ids=None, root=ARCHIVE):
-    return await process_media(client, entity, "файл", ids, root)
+async def read_files(client, entity, ids=None, root=ARCHIVE, topic=None):
+    return await process_media(client, entity, "файл", ids, root, topic)
 
 
 def media_file(folder: Path, msg) -> Path:
@@ -473,22 +484,23 @@ async def download_large(client, msg, folder: Path) -> str:
     return f"#{msg.id}: {dest}"
 
 
-async def sync_chat(client, entity, days=None, root=ARCHIVE):
+async def sync_chat(client, entity, days=None, topic=None, root=ARCHIVE):
     """New messages first, then older history down to the target depth, newest first:
-    an interrupted load leaves a gap-free archive that ends at the present."""
+    an interrupted load leaves a gap-free archive that ends at the present.
+    topic — (id, название) топика форума: выгружаются только его сообщения, в папку топика."""
     start = time.monotonic()
-    path = chat_dir(root, get_peer_id(entity), get_display_name(entity))
+    path = topic_dir(root, get_peer_id(entity), get_display_name(entity), *topic) if topic else chat_dir(root, get_peer_id(entity), get_display_name(entity))
     first_id, last_id = id_range(path)
     # The depth (unix time, 0 = the whole history) is kept on disk: a big load spans several calls.
     depth = path / ".depth"
-    target = float(depth.read_text()) if depth.exists() else None
+    target = float(depth.read_text(encoding="utf-8")) if depth.exists() else None
     if days:
         since = time.time() - days * 86400
         target = since if target is None else min(target, since)
     elif target is None and last_id == 0:
         target = 0.0
     if target is not None:
-        depth.write_text(str(target))
+        depth.write_text(str(target), encoding="utf-8")
     buf: dict[str, list[str]] = {}
     new = old = voiced = unvoiced = 0
     auto = {"фото": 0, "файл": 0}
@@ -506,7 +518,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
     try:
         if last_id:
             try:
-                async for msg in client.iter_messages(entity, min_id=last_id, reverse=True, wait_time=1):
+                async for msg in client.iter_messages(entity, min_id=last_id, reply_to=topic[0] if topic else None, reverse=True, wait_time=1):
                     if isinstance(msg, MessageService):
                         continue
                     transcript = None
@@ -543,7 +555,7 @@ async def sync_chat(client, entity, days=None, root=ARCHIVE):
         if target is not None:
             # Old history is not transcribed, OCR'd or read: that is done lazily, when a task needs it.
             try:
-                async for msg in client.iter_messages(entity, max_id=first_id, wait_time=1):
+                async for msg in client.iter_messages(entity, max_id=first_id, reply_to=topic[0] if topic else None, wait_time=1):
                     if msg.date.timestamp() < target:
                         break
                     if isinstance(msg, MessageService):

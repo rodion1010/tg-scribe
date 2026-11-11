@@ -10,7 +10,7 @@ import pytest
 
 from tgc.archive import (
     HEADER, Unreadable, append, chat_dir, describe, download_large, extract_text, format_line, id_range, month_files, ocr_photos,
-    pending_ids, read_files, recognize, set_media, sync_chat, update_block,
+    pending_ids, read_files, recognize, set_media, sync_chat, topic_dir, update_block,
 )
 from telethon.tl.types import (
     Document, DocumentAttributeAudio, DocumentAttributeFilename, Message, MessageFwdHeader, MessageMediaDocument,
@@ -53,6 +53,14 @@ def test_chat_dir_survives_rename(tmp_path):
     first = chat_dir(tmp_path, -100123, "Старое имя")
     assert chat_dir(tmp_path, -100123, "Новое имя") == first
     assert chat_dir(tmp_path, 123, "Другой") != first
+
+
+def test_topic_dir_inside_chat_and_survives_rename(tmp_path):
+    chat = chat_dir(tmp_path, -100123, "Чат")
+    t = topic_dir(tmp_path, -100123, "Чат", 5, "GPT Model Hub")
+    assert t == chat / "GPT-Model-Hub__5"  # пробел — в слаг, папка внутри папки чата
+    assert topic_dir(tmp_path, -100123, "Чат", 5, "Переименованный") == t  # находится по id
+    assert topic_dir(tmp_path, -100123, "Чат", 6, "Другой") != t
 
 
 def test_update_block_in_previous_month(tmp_path):
@@ -122,7 +130,7 @@ class FakeChat:
         i = len(self.msgs) + 1
         self.msgs.append(Message(i, PeerUser(1), date, "", media=MessageMediaPhoto(photo=Photo(i, 0, b"", date, [], 2))))
 
-    async def iter_messages(self, entity, min_id=0, max_id=0, reverse=False, wait_time=None):
+    async def iter_messages(self, entity, min_id=0, max_id=0, reverse=False, wait_time=None, reply_to=None):
         msgs = [m for m in self.msgs if m.id > min_id and (not max_id or m.id < max_id)]
         for m in msgs if reverse else msgs[::-1]:
             yield m

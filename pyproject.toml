@@ -10,6 +10,8 @@ dependencies = [
     "mcp",
     "pyobjc-framework-vision>=13.0 ; sys_platform == 'darwin'",
     "pyobjc-framework-quartz>=13.0 ; sys_platform == 'darwin'",
+    "segno>=1.6.6",
+    "python-socks[asyncio]>=3.2.1",
 ]
 
 [dependency-groups]
