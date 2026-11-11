@@ -9,7 +9,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from telethon.tl.functions.messages import GetForumTopicsByIDRequest, GetForumTopicsRequest
 from telethon.tl.types import PeerUser, User
 
-from tgc.client import proxy_spec, resolve, resolve_proxy, resolve_topic, system_proxies, topics
+from tgc.client import mask_credentials, proxy_spec, resolve, resolve_proxy, resolve_topic, system_proxies, topics
 
 ANNA = User(id=1, first_name="Анна")
 ANNA_S = User(id=2, first_name="Анна", last_name="Смирнова")
@@ -22,15 +22,18 @@ class FakeClient:
         self.topic_pages = list(topic_pages)
         self.topics_by_id = list(topics_by_id)
         self._page = 0
+        self.requests = []
 
     async def get_me(self):
         return "self"
 
     async def __call__(self, request):  # contacts.SearchRequest
         if isinstance(request, GetForumTopicsRequest):
+            self.requests.append(request)
             page = self.topic_pages[self._page] if self._page < len(self.topic_pages) else []
             self._page += 1
-            return SimpleNamespace(topics=page)
+            msgs = [SimpleNamespace(id=t.top_message, date=t.date) for t in page if hasattr(t, "top_message")]
+            return SimpleNamespace(topics=page, messages=msgs)
         if isinstance(request, GetForumTopicsByIDRequest):
             return SimpleNamespace(topics=self.topics_by_id)
         return SimpleNamespace(users=list(self.found), chats=[], my_results=[PeerUser(u.id) for u in self.found])
@@ -256,3 +259,45 @@ def test_proxy_spec_decodes_percent_escapes():
     # «@» and «:» in a login or password must be written as %40 and %3A in the URL
     spec, _ = proxy_spec("socks5://us%3Aer:p%40ss@127.0.0.1:1080")
     assert spec["username"] == "us:er" and spec["password"] == "p@ss"
+
+
+def test_topics_next_page_uses_all_offsets_of_last_topic():
+    # offset_date=0 means «from the start»: with only offset_topic the server returns page one again
+    from datetime import datetime, timezone
+    d = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    last = SimpleNamespace(id=7, title="Seven", top_message=700, date=d)
+    c = FakeClient(topic_pages=[[T_GENERAL, last], [T_HUB], []])
+    assert [i for i, _ in asyncio.run(topics(c, FORUM))] == [1, 7, 2]
+    second = c.requests[1]
+    assert (second.offset_date, second.offset_id, second.offset_topic) == (d, 700, 7)
+
+
+def test_mask_credentials_hides_mtproto_secret_and_unparsed_password():
+    assert mask_credentials("mtproto://1.2.3.4:443/ee1603dddeadbeef") == "mtproto://1.2.3.4:443/***"
+    assert "pass" not in mask_credentials("socks5://user:pass@")
+
+
+def test_proxy_spec_error_does_not_show_password():
+    with pytest.raises(ToolError) as e:
+        proxy_spec("socks5://user:secret@127.0.0.1")  # no port
+    assert "secret" not in str(e.value)
+
+
+def test_proxy_spec_bad_port_is_a_tool_error_without_password():
+    # p.port raises ValueError: MCP would hide it, and every tool would fail without a reason
+    for url in ("socks5://u:secret@host:99999", "socks5://u:secret@host:port", "mtproto://host:port/abc"):
+        with pytest.raises(ToolError) as e:
+            proxy_spec(url)
+        assert "secret" not in str(e.value)
+
+
+def test_resolve_proxy_auto_skips_bad_port(monkeypatch):
+    monkeypatch.setattr("tgc.client.system_proxies", lambda: [
+        ("http://host:port", "переменная окружения https_proxy"),
+        ("socks5://os:1080", "настройки прокси ОС"),
+    ])
+    assert resolve_proxy("auto")[0]["addr"] == "os"
+
+
+def test_mask_credentials_hides_mtproto_secret_without_host():
+    assert mask_credentials("mtproto:///ee1603secret") == "mtproto://***"
