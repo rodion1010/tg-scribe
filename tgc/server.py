@@ -1,4 +1,5 @@
 import logging
+import sys
 from pathlib import Path
 
 from telethon.errors import RPCError
@@ -362,5 +363,40 @@ async def forward_messages(chat: str, ids: list[int], to: str) -> str:
     return out
 
 
+def build_http(provider) -> MCPServer:
+    srv = build(http=True, auth=provider.settings(), auth_server_provider=provider)
+    srv.custom_route("/login", ["GET", "POST"])(provider.login)
+    return srv
+
+
+def main(argv: list[str]):
+    """No flags: stdio for a local agent. --http: the server mode behind Caddy. The other two manage its login."""
+    if "--set-password" in argv:
+        from getpass import getpass
+
+        from tgc.oauth import config_path, set_password
+
+        password = getpass("Пароль для страницы входа (от 12 символов): ")
+        if len(password) < 12:
+            raise SystemExit("Нужно не меньше 12 символов")
+        if getpass("Ещё раз: ") != password:
+            raise SystemExit("Пароли не совпали")
+        set_password(password)
+        print(f"Хеш пароля записан в {config_path()}")
+    elif "--revoke-all" in argv:
+        from tgc.oauth import revoke_all
+
+        revoke_all()
+        print("Все клиенты и токены отозваны: подключите приложения заново")
+    elif "--http" in argv:
+        from tgc.oauth import Provider, server_config
+
+        provider = Provider(*server_config())
+        build_http(provider).run(transport="streamable-http", host="0.0.0.0", port=8000, streamable_http_path="/mcp",
+                                 transport_security=provider.transport_security())
+    else:
+        build().run()
+
+
 if __name__ == "__main__":
-    build().run()
+    main(sys.argv[1:])
