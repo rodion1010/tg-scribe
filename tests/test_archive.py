@@ -397,7 +397,7 @@ def test_textutil_timeout_is_unreadable(monkeypatch):
 
     monkeypatch.setattr("tgc.archive.subprocess.run", hang)
     with pytest.raises(Unreadable):  # marked "не читается" instead of retried on every call
-        extract_text("a.doc", b"...")
+        extract_text("a.doc", b"\xd0\xcf\x11\xe0 a Word binary, so textutil or antiword runs")
 
 
 def test_sync_does_not_count_big_file_as_read(tmp_path):
@@ -479,3 +479,94 @@ def test_archive_grep(tmp_path, monkeypatch):
     monkeypatch.setattr(archive, "GREP_LIMIT", 2)
     out = archive.grep_archive(tmp_path, "аванс")
     assert len(unwrap(out).splitlines()) == 2 and out.endswith("найдено больше 2, уточни запрос")
+
+
+# --- Linux readers -------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def need(*tools):
+    """A missing tool skips the test on a developer's machine, but fails it in the image (TGC_REQUIRE_LINUX_TOOLS=1)."""
+    import os
+    import shutil
+
+    missing = [t for t in tools if not shutil.which(t)]
+    if missing and os.environ.get("TGC_REQUIRE_LINUX_TOOLS"):
+        pytest.fail(f"not installed: {', '.join(missing)}")
+    if missing:
+        pytest.skip(f"not installed: {', '.join(missing)}")
+
+
+def text_pdf(text: str) -> bytes:
+    """A one-page PDF with a text layer in a standard font."""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            None, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    stream = f"BT /F1 18 Tf 20 50 Td ({text}) Tj ET".encode()
+    objs[3] = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i, o)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux readers")
+def test_linux_ocr_photo_and_heic():
+    need("tesseract")
+    from PIL import Image
+    from pillow_heif import register_heif_opener
+
+    png = (FIXTURES / "ocr.png").read_bytes()
+    lines = recognize(png)
+    assert "Встреча перенесена на 14:30 в четверг" in lines and "Deploy failed: exit code 137 (OOMKilled)" in lines
+    register_heif_opener()
+    heic = io.BytesIO()
+    Image.open(io.BytesIO(png)).convert("RGB").save(heic, "HEIF")
+    assert "Deploy failed: exit code 137 (OOMKilled)" in extract_text("IMG_1.HEIC", heic.getvalue())[0]
+    with pytest.raises(Unreadable):
+        recognize(b"not an image")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux readers")
+def test_linux_pixel_limit(monkeypatch):
+    import tgc.archive as archive
+
+    monkeypatch.setattr(archive, "MAX_PIXELS", 100)
+    with pytest.raises(Unreadable, match="px"):
+        recognize((FIXTURES / "ocr.png").read_bytes())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux readers")
+def test_linux_pdf_text_and_scan():
+    need("tesseract")
+    from PIL import Image
+
+    assert extract_text("a.pdf", text_pdf("Hello PDF")) == (["Hello PDF"], ", 1 стр.")
+    scan = io.BytesIO()
+    Image.open(FIXTURES / "ocr.png").convert("RGB").save(scan, "PDF", resolution=100)
+    lines, info = extract_text("scan.pdf", scan.getvalue())
+    # tesseract on a render is close, not exact (it once read "OOMkKilled"): check the words that matter
+    assert info == ", 1 стр., скан" and any("Deploy failed: exit code 137" in s for s in lines)
+    with pytest.raises(Unreadable):
+        extract_text("a.pdf", b"not a pdf")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux readers")
+def test_linux_doc_and_rtf():
+    need("antiword")
+    lines, _ = extract_text("a.doc", (FIXTURES / "word97.doc").read_bytes())
+    assert "Sample Word Document Title" in lines
+    u = chr(92) + "u"  # RTF unicode escapes: мир
+    rtf = (r"{\rtf1\ansi\ansicpg1251\deff0{\fonttbl{\f0 Arial;}}\f0 \'cf\'f0\'e8\'e2\'e5\'f2 "
+           + f"{u}1084?{u}1080?{u}1088?" + r"\par World\par}").encode()
+    assert extract_text("a.rtf", rtf) == (["Привет мир", "World"], "")
+    with pytest.raises(Unreadable):
+        extract_text("a.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 broken word file")
+    with pytest.raises(Unreadable):
+        extract_text("a.rtf", b"not an rtf")
+    assert extract_text("a.doc", "просто текст".encode())[0] == ["просто текст"]

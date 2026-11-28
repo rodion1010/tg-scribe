@@ -1,9 +1,11 @@
 import asyncio
+import codecs
 import html
 import io
 import re
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -260,6 +262,96 @@ def textutil(data: bytes, ext: str) -> str:
     if r.returncode or (r.stderr.strip() and not r.stdout.strip()):  # textutil can exit 0 on a read error
         raise Unreadable(f"textutil: {r.stderr.decode('utf-8', 'replace').strip()}")
     return r.stdout.decode("utf-8", "replace")
+
+
+# --- the same readers on Linux -------------------------------------------
+
+MAX_PIXELS = 40_000_000  # a decoded image above this is refused: a small file can unpack into gigabytes
+TOOL_TIMEOUT_S = 60
+OCR_BUDGET_S = 120  # scanned pages of one PDF; leaves room in the 200 s call budget
+
+
+def tesseract_text(data: bytes) -> list[str]:
+    """Text on an image via tesseract. HEIC and any other Pillow format is turned into PNG first."""
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    try:
+        img = Image.open(io.BytesIO(data))
+        if img.width * img.height > MAX_PIXELS:
+            raise Unreadable(f"image: {img.width}x{img.height} px")
+        img = ImageOps.exif_transpose(img).convert("L")  # a phone photo lies on its side until EXIF turns it
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
+        raise Unreadable(f"image: {e}") from e
+    png = io.BytesIO()
+    img.save(png, "PNG")
+    try:  # no tesseract installed is not a broken file: FileNotFoundError leaves it for a retry
+        r = subprocess.run(["tesseract", "stdin", "stdout", "-l", "rus+eng"], input=png.getvalue(), capture_output=True,
+                           timeout=TOOL_TIMEOUT_S)
+    except subprocess.TimeoutExpired as e:
+        raise Unreadable("tesseract: timeout") from e
+    if r.returncode:
+        raise Unreadable(f"tesseract: {r.stderr.decode('utf-8', 'replace').strip()}")
+    return [s for line in r.stdout.decode("utf-8", "replace").splitlines() if (s := " ".join(line.split()))]
+
+
+def pdfium_text(data: bytes) -> tuple[str, str]:
+    """pdf_text via pdfium: the text layer, and a page without one rendered and read with tesseract."""
+    import pypdfium2 as pdfium
+
+    try:
+        doc = pdfium.PdfDocument(data)
+    except pdfium.PdfiumError as e:  # broken or password-protected
+        raise Unreadable("PDF") from e
+    try:
+        pages, ocr, deadline = [], 0, time.monotonic() + OCR_BUDGET_S
+        for i in range(len(doc)):
+            page = doc[i]
+            text = JUNK.sub("", page.get_textpage().get_text_range())
+            # shortcut: scanned pages past MAX_OCR_PAGES or OCR_BUDGET_S stay unread; OCR on demand if long scans show up.
+            if not text.strip() and ocr < MAX_OCR_PAGES and time.monotonic() < deadline:
+                w, h = page.get_size()
+                png = io.BytesIO()
+                page.render(scale=min(3, 3000 / max(w, h, 1))).to_pil().save(png, "PNG")  # as on macOS: ~200 dpi, ≤ 3000 px
+                text = "\n".join(tesseract_text(png.getvalue()))
+                ocr += 1
+            pages.append(text)
+        return "\n".join(pages), f", {len(doc)} стр." + (", скан" if ocr else "")
+    finally:
+        doc.close()
+
+
+def linux_word_text(data: bytes, ext: str) -> str:
+    """textutil's job on Linux: doc via antiword, rtf via striprtf (unrtf garbles Cyrillic)."""
+    if ext == "rtf":
+        from striprtf.striprtf import rtf_to_text
+
+        if not data.lstrip().startswith(b"{\\rtf"):
+            raise Unreadable("rtf: no RTF header")
+        cp = re.search(rb"\\ansicpg(\d+)", data[:4096])
+        enc = f"cp{int(cp.group(1))}" if cp else "cp1252"
+        try:
+            codecs.lookup(enc)
+        except LookupError:
+            enc = "cp1252"
+        return rtf_to_text(data.decode("latin-1"), encoding=enc, errors="replace")
+    if not data.startswith(WORD_BINARY):  # plain text saved as .doc: textutil reads it, antiword refuses it
+        return decode(data)
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / "in.doc"
+        src.write_bytes(data)
+        try:
+            r = subprocess.run(["antiword", "-m", "UTF-8.txt", str(src)], capture_output=True, timeout=TOOL_TIMEOUT_S)
+        except subprocess.TimeoutExpired as e:
+            raise Unreadable("antiword: timeout") from e
+    if r.returncode:
+        raise Unreadable(f"antiword: {r.stderr.decode('utf-8', 'replace').strip()}")
+    return r.stdout.decode("utf-8", "replace")
+
+
+if sys.platform == "linux":  # same names, Linux tools: callers do not care which OS reads the file
+    recognize, pdf_text, textutil = tesseract_text, pdfium_text, linux_word_text
 
 
 def zip_part(z: zipfile.ZipFile, name: str) -> str:

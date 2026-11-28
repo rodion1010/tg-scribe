@@ -12,6 +12,10 @@ dependencies = [
     "pyobjc-framework-quartz>=13.0 ; sys_platform == 'darwin'",
     "segno>=1.6.6",
     "python-socks[asyncio]>=3.2.1",
+    "pypdfium2>=5.15.2 ; sys_platform == 'linux'",
+    "pillow>=13.0.0 ; sys_platform == 'linux'",
+    "pillow-heif>=1.9.0 ; sys_platform == 'linux'",
+    "striprtf>=0.0.35 ; sys_platform == 'linux'",
 ]
 
 [dependency-groups]
