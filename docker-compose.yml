@@ -1,0 +1,31 @@
+# tg-scribe server mode. Setup: README, "Server mode".
+services:
+  tg:
+    build: .
+    restart: unless-stopped
+    user: "${TGC_UID:-1000}:${TGC_UID:-1000}"  # owner of ./data on the host
+    volumes:
+      - ./data/tgc:/home/app/.tgc        # config.toml, Telegram session, oauth.json
+      - ./data/archive:/app/archive
+    expose:
+      - "8000"                           # Caddy only; nothing is published to the host
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data                 # TLS certificates
+      - caddy_config:/config
+    depends_on:
+      - tg
+
+volumes:
+  caddy_data:
+  caddy_config:
