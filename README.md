@@ -4,7 +4,7 @@ English | [Русский](README.ru.md)
 
 A local MCP server for macOS and Windows that gives an AI agent, such as Claude Code, access to your Telegram account. The agent saves your chats as Markdown files on disk and works with them: searches, analyzes, summarizes, drafts replies.
 
-The server runs on your machine and connects to Telegram as you, over the official MTProto protocol. It uses the Telethon library and your own `api_id`. Text on photos and reading PDF, doc and rtf use Apple Vision, PDFKit and textutil, so these features need a Mac; everything else — login, archive, search, sending, forwarding, proxy — works on Windows too.
+The server runs on your machine and connects to Telegram as you, over the official MTProto protocol. It uses the Telethon library and your own `api_id`. Text on photos and reading PDF, doc and rtf use Apple Vision, PDFKit and textutil on a Mac, and tesseract, pdfium and antiword on Linux; Windows lacks these features, everything else — login, archive, search, sending, forwarding, proxy — works there too. You can also run the server on your own VPS and reach it from your phone: see [Server mode](#server-mode).
 
 ## Contents
 
@@ -17,6 +17,7 @@ The server runs on your machine and connects to Telegram as you, over the offici
 - [Choosing a chat](#choosing-a-chat)
 - [Forum topics](#forum-topics)
 - [Proxy](#proxy)
+- [Server mode](#server-mode)
 - [Limits and risks](#limits-and-risks)
 - [Development](#development)
 - [License](#license)
@@ -29,9 +30,11 @@ The server runs on your machine and connects to Telegram as you, over the offici
 | `list_topics` | Shows the topics of a forum chat: id and title |
 | `sync_chat` | Saves a chat to the archive: the last N days or the whole history. Later calls add new messages. `topic` saves only one forum topic |
 | `transcribe` | Transcribes voice and video messages. Needs Telegram Premium |
-| `ocr_photos` | Reads text on photos with Apple Vision, locally on your Mac |
-| `read_files` | Reads the text of txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and image files locally on your Mac, including scanned PDFs, and saves it to `text/<id>.txt` in the chat folder |
+| `ocr_photos` | Reads text on photos: with Apple Vision on a Mac, with tesseract on Linux |
+| `read_files` | Reads the text of txt, md, csv, html, pdf, doc, docx, rtf, xlsx, pptx and image files where the server runs, including scanned PDFs, and saves it to `text/<id>.txt` in the chat folder |
 | `fetch_media` | Downloads a photo or a file up to 50 MB so the agent can look at it. Files keep their names: `<id>_<name>`. Videos and audio are not downloaded |
+| `archive_read` | Reads an archive file in parts: a month of messages or a file's text. For an agent that cannot see the server's disk |
+| `archive_grep` | Searches the saved archive, messages and file texts, for a string: up to 100 matches |
 | `describe_media` | Saves a short description of a photo or a file to the archive |
 | `fetch_large_file` | Downloads a file over 50 MB after you confirm it. A big file is downloaded over several calls |
 | `send_message` | Sends a message after you confirm it |
@@ -105,7 +108,7 @@ The archive only grows: messages edited or deleted in Telegram stay as they were
 
 ## Requirements
 
-- macOS or Windows. Login, archive, search, sending, forwarding and proxy work on both; text recognition on photos and reading PDF, doc and rtf need macOS (Apple Vision, PDFKit, textutil).
+- macOS, Linux or Windows. Login, archive, search, sending, forwarding and proxy work everywhere; text recognition on photos and reading PDF, doc and rtf work on macOS (Apple Vision, PDFKit, textutil) and Linux (tesseract, pdfium, antiword — the Docker image installs them, see [Server mode](#server-mode); without Docker: `sudo apt install tesseract-ocr tesseract-ocr-rus antiword`).
 - [uv](https://docs.astral.sh/uv/). It installs Python 3.12 and all dependencies by itself, including `python-socks` for proxy connections.
 - An AI agent with MCP support, such as [Claude Code](https://claude.com/claude-code).
 - A Telegram account. Transcribing voice messages needs Telegram Premium.
@@ -332,6 +335,85 @@ proxy = "socks5://127.0.0.1:1080"
 
 At startup the server writes the connection method to its log, for example: `Telegram: подключаюсь напрямую (proxy в config.toml не задан)` or `Telegram: подключаюсь через прокси socks5://127.0.0.1:1080 (из config.toml)`.
 
+## Server mode
+
+You can run the server on your own Linux VPS. Then claude.ai — on your phone too —, Claude Code and other MCP clients with OAuth connect to it at an address like `https://tg.example.com/mcp`. One server serves one Telegram account. The server keeps its own archive; it is not synced with a local one.
+
+You need: a VPS with Docker and Docker Compose, a domain pointing at it, ports 80 and 443 open, and an `api_id` and `api_hash` (installation step 2).
+
+### Installing on a server
+
+1. Get the project and create `.env`:
+
+   ```bash
+   git clone https://github.com/rodion1010/tg-scribe.git && cd tg-scribe
+   cp .env.example .env
+   ```
+
+   In `.env`, set the domain (`DOMAIN=tg.example.com`) and your UID (`TGC_UID=`, the output of `id -u`): the server runs as this user and the data belongs to it.
+
+2. Create the data folders and the config:
+
+   ```bash
+   mkdir -p data/tgc data/archive && chmod 700 data/tgc
+   ```
+
+   `data/tgc/config.toml`:
+
+   ```toml
+   api_id = 12345
+   api_hash = "abc..."
+   public_url = "https://tg.example.com"
+   ```
+
+3. Build the image and set the login page password, 12 characters or more. Only its hash goes to the config:
+
+   ```bash
+   docker compose build
+   docker compose run --rm tg python -m tgc.server --set-password
+   ```
+
+4. Log in to Telegram. The QR code appears in the terminal: scan it in Telegram on your phone (**Settings → Devices → Link Desktop Device**). A terminal open on that same phone cannot be scanned: connect to the server from a computer.
+
+   ```bash
+   docker compose run --rm tg python -m tgc.login --terminal
+   ```
+
+5. Start the server. Caddy gets a TLS certificate for the domain by itself:
+
+   ```bash
+   docker compose up -d
+   ```
+
+6. Connect a client:
+   - **claude.ai**: **Settings → Connectors → Add custom connector**, address `https://tg.example.com/mcp`. The server's login page opens: check that the code goes to a claude.ai address and enter the password.
+   - **Claude Code**: `claude mcp add --transport http tg https://tg.example.com/mcp`, then `/mcp` → authenticate.
+
+### How it differs from the local mode
+
+- The agent reads the archive with `archive_read` and searches it with `archive_grep`: it cannot see the server's files.
+- `fetch_media` returns photos and images in the answer: up to 5 per call, up to 5 MB each. Other files the agent reads as text: `read_files`, then `archive_read`.
+- Files over 50 MB are not available: `fetch_large_file` is off in the server mode.
+- Text on photos and scans is read by tesseract. On phone photos it makes more mistakes than Apple Vision.
+
+### Confirming sends
+
+The server does not ask for confirmation itself: `send_message` and `forward_messages` send at once. The app shows the confirmation. In claude.ai, keep these two tools at **Needs approval** on the connector page. **Always allow** removes the only protection against a send prompted by text in someone else's message.
+
+| App | Asks before `send_message` and `forward_messages` |
+|---|---|
+| claude.ai | not checked yet |
+| Claude Code | not checked yet |
+| ChatGPT | not checked yet |
+
+### Maintenance
+
+- **Disconnect every app** (a lost phone, say): `docker compose exec tg python -m tgc.server --revoke-all`. It takes effect at once, no restart needed. Then connect the apps you need again.
+- **Change the password**: run `--set-password` again, then `docker compose restart tg`.
+- **Login lockout.** After 5 wrong passwords the login page closes for 15 minutes for everyone. A stranger can use this to keep you from connecting a new app; connected apps keep working. To lift it sooner: `docker compose restart tg`.
+- **Backup**: the `data/` folder. `data/tgc` holds the Telegram session with full access to the account: keep copies as carefully.
+- **Update**: `git pull && docker compose up -d --build`. **Logs**: `docker compose logs -f tg`.
+
 ## Limits and risks
 
 - **Telegram limits.** If Telegram asks to wait longer than 30 seconds, the server stops and says how long to wait. It never waits longer than 30 seconds itself, so the call does not time out.
@@ -348,12 +430,15 @@ Run the tests:
 uv run pytest
 ```
 
-The code has four modules:
+Tests in the Docker image, with the Linux tools required: `docker build --target test .`
+
+The code has five modules:
 
 - `tgc/client.py`: Telegram connection and chat lookup;
 - `tgc/archive.py`: archive format, sync, transcription and text recognition;
 - `tgc/server.py`: MCP tools and instructions for the agent;
-- `tgc/login.py`: account login.
+- `tgc/login.py`: account login;
+- `tgc/oauth.py`: OAuth login for the server mode.
 
 ## License
 
