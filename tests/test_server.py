@@ -91,3 +91,13 @@ def test_folder_by_rules_without_explicit_chats(monkeypatch):
     out = asyncio.run(server.list_dialogs(folder="grou"))
     assert "Группа" in out and "Другая" not in out and "Бот" not in out and "Иван" not in out
     assert "не найдена" in asyncio.run(server.list_dialogs(folder="нет такой"))
+
+
+def test_archive_grep_unsynced_chat_creates_nothing(tmp_path, monkeypatch):
+    fake_telegram(monkeypatch, object())
+    monkeypatch.setattr(server, "ARCHIVE", tmp_path)
+    assert "ещё нет в архиве" in asyncio.run(server.archive_grep("аванс", chat="Иван"))
+    assert list(tmp_path.iterdir()) == []
+    (tmp_path / "Иван__1").mkdir()
+    (tmp_path / "Иван__1" / "2026-10.md").write_text("[2026-10-01 10:00] #2 Иван: аванс\n", encoding="utf-8")
+    assert "#2 Иван: аванс" in asyncio.run(server.archive_grep("аванс", chat="Иван"))

@@ -409,3 +409,73 @@ def test_sync_does_not_count_big_file_as_read(tmp_path):
     out = asyncio.run(sync_chat(chat, user, root=tmp_path))
     assert "файлов прочитано 1" in out and chat.downloads == 1  # a.txt only
     assert pending_ids(chat_dir(tmp_path, 1, "Иван"), "файл") == [4]  # over 10 MB: left for read_files
+
+
+# --- archive_read / archive_grep -----------------------------------------
+
+def unwrap(out: str) -> str:
+    """The body between the archive-data tags."""
+    head, _, rest = out.partition("\n")
+    assert head.startswith("<archive-data id=")
+    body, _, _ = rest.rpartition("\n</archive-data id=")
+    return body
+
+
+def test_archive_path_stays_inside(tmp_path):
+    from tgc.archive import archive_path, read_archive
+
+    root = tmp_path / "archive"
+    (root / "Иван__1").mkdir(parents=True)
+    (root / "Иван__1" / "2026-10.md").write_text("x\n", encoding="utf-8")
+    (tmp_path / "secret.toml").write_text("api_hash", encoding="utf-8")
+    (root / "link").symlink_to(tmp_path)
+    for bad in ("../secret.toml", "Иван__1/../../secret.toml", str(tmp_path / "secret.toml"), "link/secret.toml"):
+        assert "вне архива" in read_archive(root, bad), bad
+    assert archive_path(root, str(root / "Иван__1" / "2026-10.md")) == (root / "Иван__1" / "2026-10.md").resolve()
+    assert unwrap(read_archive(root, "Иван__1/2026-10.md")) == "x\n"
+    assert "нет такого файла" in read_archive(root, "Иван__1/2026-11.md")
+
+
+def test_archive_read_pages_without_loss(tmp_path, monkeypatch):
+    import tgc.archive as archive
+
+    monkeypatch.setattr(archive, "READ_CHARS", 10)
+    text = "abc\ndefgh\n" + "x" * 25 + "\nend\n"  # one line longer than a page
+    (tmp_path / "f.md").write_text(text, encoding="utf-8")
+    got, offset, calls = "", 0, 0
+    while True:
+        out = archive.read_archive(tmp_path, "f.md", offset)
+        body, _, tail = out.partition("\n</archive-data")
+        got += unwrap(out)
+        calls += 1
+        if "продолжение: offset=" not in tail:
+            break
+        offset = int(tail.rsplit("offset=", 1)[1])
+    assert got == text and calls > 3
+    assert unwrap(archive.read_archive(tmp_path, "f.md")) == "abc\ndefgh\n"  # a page ends at a line end when it can
+
+
+def test_archive_grep(tmp_path, monkeypatch):
+    import tgc.archive as archive
+
+    chat, other = tmp_path / "Иван__1", tmp_path / "Пётр__2"
+    for d in (chat / "text", other, chat / "media"):
+        d.mkdir(parents=True)
+    (chat / "2026-09.md").write_text("[2026-09-01 10:00] #1 Иван: Аванс 100\n", encoding="utf-8")
+    (chat / "2026-10.md").write_text("[2026-10-01 10:00] #2 Иван: без него\n[2026-10-02 10:00] #3 Я: аванс получил\n", encoding="utf-8")
+    (chat / "text" / "5.txt").write_text("до " + "я" * 500 + " АВАНС " + "я" * 500 + "\n", encoding="utf-8")
+    (chat / "media" / "9_notes.md").write_text("аванс в скачанном файле\n", encoding="utf-8")
+    (other / "2026-10.md").write_text("[2026-10-01 10:00] #7 Пётр: аванс\n", encoding="utf-8")
+
+    body = unwrap(archive.grep_archive(tmp_path, "аванс", chat))
+    lines = body.splitlines()
+    assert lines[0].startswith(str(Path("Иван__1") / "text" / "5.txt") + ":1: …")  # newest first, cut around the match
+    assert len(lines[0]) < 400 and "АВАНС" in lines[0]
+    assert lines[1] == f"{Path('Иван__1') / '2026-10.md'}:2: [2026-10-02 10:00] #3 Я: аванс получил"
+    assert lines[2].endswith("Иван: Аванс 100") and len(lines) == 3  # other chats and media/ are not searched
+    assert "Пётр" in archive.grep_archive(tmp_path, "аванс")
+    assert archive.grep_archive(tmp_path, "нет такого") == "ничего не найдено"
+
+    monkeypatch.setattr(archive, "GREP_LIMIT", 2)
+    out = archive.grep_archive(tmp_path, "аванс")
+    assert len(unwrap(out).splitlines()) == 2 and out.endswith("найдено больше 2, уточни запрос")

@@ -2,6 +2,7 @@ import asyncio
 import html
 import io
 import re
+import secrets
 import subprocess
 import tempfile
 import time
@@ -63,6 +64,67 @@ def topic_dir(root: Path, chat_id: int, chat_title: str, topic_id: int, topic_ti
 
 def month_files(path: Path):
     return sorted(path.glob("????-??.md"))
+
+
+# --- archive access for agents that cannot read the disk -----------------
+
+READ_CHARS = 40_000  # ~25k tokens of Cyrillic at worst: one archive_read answer stays under the client's tool-result cap
+GREP_LIMIT = 100
+GREP_WINDOW = 300  # a long line (a whole xlsx row, a file's text) is cut to this around the match
+
+
+def archive_path(root: Path, path: str) -> Path:
+    """A path inside the archive. Resolved first, so "..", a symlink or an absolute path cannot leave it."""
+    p = (root / path).resolve()
+    if not p.is_relative_to(root.resolve()):
+        raise ValueError(f"{path}: вне архива")
+    return p
+
+
+def wrap(body: str) -> str:
+    """Marks where archive data starts and ends; a hint for the model, not a guarantee: the data can contain anything."""
+    tag = secrets.token_hex(3)
+    return f"<archive-data id={tag}>\n{body}\n</archive-data id={tag}>"
+
+
+def read_archive(root: Path, path: str, offset: int = 0) -> str:
+    """Up to READ_CHARS characters of an archive file from offset (in characters); a long line goes on in the next call."""
+    try:
+        f = archive_path(root, path)
+    except ValueError as e:
+        return str(e)
+    if not f.is_file():
+        return f"{path}: нет такого файла"
+    text = f.read_text(encoding="utf-8")
+    offset = max(0, offset)
+    end = min(offset + READ_CHARS, len(text))
+    if end < len(text):
+        cut = text.rfind("\n", offset, end)
+        end = cut + 1 if cut >= offset else end  # one line longer than the limit is cut inside, not skipped
+    more = f"\nпродолжение: offset={end}" if end < len(text) else ""
+    return wrap(text[offset:end]) + more
+
+
+def grep_archive(root: Path, needle: str, base: Path | None = None) -> str:
+    """Case-insensitive substring over month files and file texts, newest month first; stops at the 101st match."""
+    needle = needle.lower()
+    if not needle.strip():
+        return "пустой запрос"
+    base = base or root
+    files = sorted((f for f in base.rglob("*") if f.is_file() and f.parent.name != "media" and (f.suffix == ".md" or f.parent.name == "text")), reverse=True)
+    out = []
+    for f in files:
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            i = line.lower().find(needle)
+            if i < 0:
+                continue
+            if len(out) == GREP_LIMIT:
+                return wrap("\n".join(out)) + f"\nнайдено больше {GREP_LIMIT}, уточни запрос"
+            if len(line) > GREP_WINDOW:
+                start = max(0, i - GREP_WINDOW // 2)
+                line = ("…" if start else "") + line[start : start + GREP_WINDOW] + ("…" if start + GREP_WINDOW < len(line) else "")
+            out.append(f"{f.relative_to(root)}:{n}: {line}")
+    return wrap("\n".join(out)) if out else "ничего не найдено"
 
 
 def id_range(path: Path) -> tuple[int, int]:
